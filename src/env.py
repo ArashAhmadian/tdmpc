@@ -235,7 +235,7 @@ class TimeStepToGymWrapper(object):
 	def step(self, action):
 		self.t += 1
 		time_step = self.env.step(action)
-		return self._obs_to_array(time_step.observation), time_step.reward, time_step.last() or self.t == self.ep_len, defaultdict(float)
+		return self._obs_to_array(time_step.observation), time_step.reward, time_step.last(), self.t == self.ep_len, defaultdict(float)
 
 	def render(self, mode='rgb_array', width=384, height=384, camera_id=0):
 		camera_id = dict(quadruped=2).get(self.domain, camera_id)
@@ -247,8 +247,8 @@ class DefaultDictWrapper(gym.Wrapper):
 		gym.Wrapper.__init__(self, env)
 
 	def step(self, action):
-		obs, reward, done, info = self.env.step(action)
-		return obs, reward, done, defaultdict(float, info)
+		obs, reward, terminated, truncated, info = self.env.step(action)
+		return obs, reward, terminated, truncated, defaultdict(float, info)
 
 
 def make_env(cfg):

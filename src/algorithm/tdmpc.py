@@ -50,7 +50,8 @@ class TOLD(nn.Module):
 
 class TDMPC():
 	"""Implementation of TD-MPC learning + inference."""
-	def __init__(self, cfg):
+	def __init__(self, cfg, new_gym=False):
+		self.new_gym = new_gym
 		self.cfg = cfg
 		self.device = torch.device('cuda')
 		self.std = h.linear_schedule(cfg.std_schedule, 0)
@@ -178,7 +179,22 @@ class TDMPC():
 
 	def update(self, replay_buffer, step):
 		"""Main update function. Corresponds to one iteration of the TOLD model learning."""
-		obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+
+		'''
+			truncated.shape = (horizon+1, batch_size)
+			terminated.shape = (horizon+1, batch_size)
+			reward.shape = (horizon+1, batch_size, 1)
+			When indexing with horizon number, make sure to unsqueeze(-1) for correct broadcasting. 
+		'''
+		if self.new_gym: 
+			obs, next_obses, action, reward, terminated, trucated, idxs, weights = replay_buffer.sample()
+			trucated = torch.logical_not(trucated)
+			terminated = torch.logical_not(trucated)
+		else: 
+			obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+			trucated = torch.ones(reward.shape[:-1]).cuda()
+			terminated = torch.ones(reward.shape[:-1]).cuda()
+
 		self.optim.zero_grad(set_to_none=True)
 		self.std = h.linear_schedule(self.cfg.std_schedule, step)
 		self.model.train()
@@ -201,10 +217,13 @@ class TDMPC():
 
 			# Losses
 			rho = (self.cfg.rho ** t)
-			consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
-			reward_loss += rho * h.mse(reward_pred, reward[t])
-			value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
-			priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
+			consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)  * trucated[t,:,None]
+
+			reward_loss += rho * h.mse(reward_pred, reward[t]) * trucated[t,:,None]
+
+			value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target)) * trucated[t,:,None]
+
+			priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target)) * trucated[t,:,None]
 
 		# Optimize model
 		total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \

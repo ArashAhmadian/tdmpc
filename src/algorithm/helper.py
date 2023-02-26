@@ -165,6 +165,8 @@ class Episode(object):
 		self.obs[0] = torch.tensor(init_obs, dtype=dtype, device=self.device)
 		self.action = torch.empty((cfg.episode_length, cfg.action_dim), dtype=torch.float32, device=self.device)
 		self.reward = torch.empty((cfg.episode_length,), dtype=torch.float32, device=self.device)
+		self.terminated = torch.empty((cfg.episode_length,), dtype=torch.int8, device=self.device)
+		self.truncated = torch.empty((cfg.episode_length,), dtype=torch.int8, device=self.device)
 		self.cumulative_reward = 0
 		self.done = False
 		self._idx = 0
@@ -180,12 +182,16 @@ class Episode(object):
 		self.add(*transition)
 		return self
 
-	def add(self, obs, action, reward, done):
+	# This will work for both new and old gym api due to the ordering of terminated and trucated. 
+
+	def add(self, obs, action, reward, terminated, truncated=None):
 		self.obs[self._idx+1] = torch.tensor(obs, dtype=self.obs.dtype, device=self.obs.device)
 		self.action[self._idx] = action
 		self.reward[self._idx] = reward
+		self.terminated[self._idx] = terminated 
+		self.truncated[self._idx] = truncated if truncated != None else terminated
 		self.cumulative_reward += reward
-		self.done = done
+		self.done = terminated or truncated
 		self._idx += 1
 
 
@@ -194,7 +200,8 @@ class ReplayBuffer():
 	Storage and sampling functionality for training TD-MPC / TOLD.
 	The replay buffer is stored in GPU memory when training from state.
 	Uses prioritized experience replay by default."""
-	def __init__(self, cfg):
+	def __init__(self, cfg, new_gym: bool = False):
+		self.new_gym = new_gym
 		self.cfg = cfg
 		self.device = torch.device(cfg.device)
 		self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
@@ -204,6 +211,8 @@ class ReplayBuffer():
 		self._last_obs = torch.empty((self.capacity//cfg.episode_length, *cfg.obs_shape), dtype=dtype, device=self.device)
 		self._action = torch.empty((self.capacity, cfg.action_dim), dtype=torch.float32, device=self.device)
 		self._reward = torch.empty((self.capacity,), dtype=torch.float32, device=self.device)
+		self._terminated = torch.empty((self.capacity,), dtype=torch.int8, device=self.device)
+		self._truncated = torch.empty((self.capacity,), dtype=torch.int8, device=self.device)
 		self._priorities = torch.ones((self.capacity,), dtype=torch.float32, device=self.device)
 		self._eps = 1e-6
 		self._full = False
@@ -218,6 +227,9 @@ class ReplayBuffer():
 		self._last_obs[self.idx//self.cfg.episode_length] = episode.obs[-1]
 		self._action[self.idx:self.idx+self.cfg.episode_length] = episode.action
 		self._reward[self.idx:self.idx+self.cfg.episode_length] = episode.reward
+		self._terminated[self.idx:self.idx+self.cfg.episode_length] = episode.terminated
+		self._truncated[self.idx:self.idx+self.cfg.episode_length] = episode.terminated
+
 		if self._full:
 			max_priority = self._priorities.max().to(self.device).item()
 		else:
@@ -258,11 +270,17 @@ class ReplayBuffer():
 		next_obs = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
 		action = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *self._action.shape[1:]), dtype=torch.float32, device=self.device)
 		reward = torch.empty((self.cfg.horizon+1, self.cfg.batch_size), dtype=torch.float32, device=self.device)
+		# Add new variables to track terminated & truncated for the new api 
+		terminated = torch.empty((self.cfg.horizon+1, self.cfg.batch_size), dtype=torch.int8, device=self.device)
+		truncated = torch.empty((self.cfg.horizon+1, self.cfg.batch_size), dtype=torch.int8, device=self.device)
+
 		for t in range(self.cfg.horizon+1):
 			_idxs = idxs + t
 			next_obs[t] = self._get_obs(self._obs, _idxs+1)
 			action[t] = self._action[_idxs]
 			reward[t] = self._reward[_idxs]
+			terminated[t] = self._terminated[_idxs]
+			truncated[t] = self._truncated[_idxs]
 
 		mask = (_idxs+1) % self.cfg.episode_length == 0
 		next_obs[-1, mask] = self._last_obs[_idxs[mask]//self.cfg.episode_length].cuda().float()
@@ -270,7 +288,11 @@ class ReplayBuffer():
 			action, reward, idxs, weights = \
 				action.cuda(), reward.cuda(), idxs.cuda(), weights.cuda()
 
-		return obs, next_obs, action, reward.unsqueeze(2), idxs, weights
+		if self.new_gym: 
+			return obs, next_obs, action, reward.unsqueeze(2), terminated, truncated, idxs, weights
+		else:
+			return obs, next_obs, action, reward.unsqueeze(2), idxs, weights
+
 
 
 def linear_schedule(schdl, step):

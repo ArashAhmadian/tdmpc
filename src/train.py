@@ -30,11 +30,11 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
 	"""Evaluate a trained agent and optionally save a video."""
 	episode_rewards = []
 	for i in range(num_episodes):
-		obs, done, ep_reward, t = env.reset(), False, 0, 0
+		obs, terminated, truncated, ep_reward, t = env.reset(), False, False, 0, 0
 		if video: video.init(env, enabled=(i==0))
-		while not done:
+		while not (terminated or truncated):
 			action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
-			obs, reward, done, _ = env.step(action.cpu().numpy())
+			obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
 			ep_reward += reward
 			if video: video.record(env)
 			t += 1
@@ -48,7 +48,13 @@ def train(cfg):
 	assert torch.cuda.is_available()
 	set_seed(cfg.seed)
 	work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-	env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg)
+	
+	# This is for readability, interface changes in most places have been harcoded assuming we're using the 
+	# new gym step_api. 
+
+	new_gym = gym.__version__ >= '0.26.0'
+	print(new_gym)
+	env, agent, buffer = make_env(cfg), TDMPC(cfg,new_gym), ReplayBuffer(cfg,new_gym)
 	
 	# Run training
 	L = logger.Logger(work_dir, cfg)
@@ -60,8 +66,8 @@ def train(cfg):
 		episode = Episode(cfg, obs)
 		while not episode.done:
 			action = agent.plan(obs, step=step, t0=episode.first)
-			obs, reward, done, _ = env.step(action.cpu().numpy())
-			episode += (obs, action, reward, done)
+			obs, reward, terminated, truncated, _ = env.step(action.cpu().numpy())
+			episode += (obs, action, reward, terminated, truncated)
 		assert len(episode) == cfg.episode_length
 		buffer += episode
 
